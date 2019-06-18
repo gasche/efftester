@@ -634,61 +634,7 @@ let new_cache () =
   (to_cache, get_cache_lst, clear_cache)
 ;;
 
-let float_gen =
-  Gen.frequency
-    [ (5, Gen.float);
-      ( 5,
-        Gen.oneofl
-          [ Float.nan;
-            Float.neg_infinity;
-            min_float;
-            -1.;
-            -0.;
-            0.;
-            Float.epsilon;
-            1.;
-            max_float;
-            Float.infinity
-          ] )
-    ]
-;;
-
-(* Generate a possibly repeated floating-point number *)
-let float_gen_with_rep_thunk () =
-  let to_cache, get_cache_lst, _ = new_cache () in
-  let from_cache_gen rs = (Gen.oneofl @@ get_cache_lst ()) rs in
-  fun rs ->
-    match get_cache_lst () with
-    | [] ->
-      Gen.map
-        (fun fl ->
-          to_cache fl;
-          fl)
-        float_gen
-        rs
-    | _xs ->
-      Gen.map
-        (fun fl ->
-          if List.mem fl (get_cache_lst ())
-          then fl
-          else (
-            to_cache fl;
-            fl))
-        (Gen.oneof [ float_gen; from_cache_gen ])
-        rs
-;;
-
-(** {!Context} is used to store the state of generators *)
-module type Context = sig
-  (** stateful float generator with value repetitions *)
-  val float_gen_with_rep : float Gen.t
-end
-
-module FreshContext () : Context = struct
-  let float_gen_with_rep = float_gen_with_rep_thunk ()
-end
-
-module Generators (Ctx : Context) = struct
+module StaticGenerators = struct
   let alpha_gen =
     let a_code = int_of_char 'a' in
     let z_code = int_of_char 'z' in
@@ -705,32 +651,48 @@ module Generators (Ctx : Context) = struct
       frequency [ (10, small_int); (5, int); (1, oneofl [ min_int; -1; 0; 1; max_int ]) ])
   ;;
 
-  let float_gen = float_gen
+  let float_gen =
+    Gen.frequency
+      [ (5, Gen.float);
+        ( 5,
+          Gen.oneofl
+            [ Float.nan;
+              Float.neg_infinity;
+              min_float;
+              -1.;
+              -0.;
+              0.;
+              Float.epsilon;
+              1.;
+              max_float;
+              Float.infinity
+            ] )
+      ]
+  ;;
 
   (* Generate a possibly repeated floating-point number *)
-  let float_gen_with_rep_thunk = float_gen_with_rep_thunk
-
-  (* Type-directed literal generator *)
-  let rec literal_gen t eff size =
-    match t with
-    | Unit -> Gen.return LitUnit
-    | Int -> Gen.map (fun i -> LitInt i) int_gen
-    | Float -> Gen.map (fun f -> LitFloat f) Ctx.float_gen_with_rep
-    | Bool -> Gen.map (fun b -> LitBool b) Gen.bool
-    | String -> Gen.map (fun s -> LitStr s) string_gen
-    | List (Typevar _) -> Gen.return (LitList [])
-    | List t ->
-      if size = 0
-      then Gen.return (LitList [])
-      else
+  let float_gen_with_rep_thunk () =
+    let to_cache, get_cache_lst, _ = new_cache () in
+    let from_cache_gen rs = (Gen.oneofl @@ get_cache_lst ()) rs in
+    fun rs ->
+      match get_cache_lst () with
+      | [] ->
         Gen.map
-          (fun ls -> LitList ls)
-          (Gen.list_size (Gen.int_bound (sqrt size)) (literal_gen t eff (sqrt size)))
-    (*     (Gen.list_size (Gen.int_bound (size/2)) (literal_gen t eff (size/2))) *)
-    (* FIXME: - one element should/can have effect, if 'eff' allows *)
-    (*        - list items should be able to contain arbitrary effectful exps *)
-    | Typevar _ -> failwith "literal_gen: typevar arg. should not happen"
-    | Fun _ -> failwith "literal_gen: funtype arg. should not happen"
+          (fun fl ->
+            to_cache fl;
+            fl)
+          float_gen
+          rs
+      | _xs ->
+        Gen.map
+          (fun fl ->
+            if List.mem fl (get_cache_lst ())
+            then fl
+            else (
+              to_cache fl;
+              fl))
+          (Gen.frequency [ (2, float_gen); (8, from_cache_gen) ])
+          rs
   ;;
 
   let eff_gen = Gen.oneofl [ (false, false); (true, false) ]
@@ -753,6 +715,44 @@ module Generators (Ctx : Context) = struct
                   eff_gen
                   (recgen (n / 2)) )
             ])
+  ;;
+end
+
+(** {!Context} is used to store the state of generator for the program that is being
+  generated *)
+module type Context = sig
+  (** stateful float generator with value repetitions *)
+  val float_gen_with_rep : float Gen.t
+end
+
+module FreshContext () : Context = struct
+  let float_gen_with_rep = StaticGenerators.float_gen_with_rep_thunk ()
+end
+
+module GeneratorsWithContext (Ctx : Context) = struct
+  open StaticGenerators
+
+  (* Type-directed literal generator *)
+  let rec literal_gen t eff size =
+    match t with
+    | Unit -> Gen.return LitUnit
+    | Int -> Gen.map (fun i -> LitInt i) int_gen
+    | Float -> Gen.map (fun f -> LitFloat f) float_gen
+    | Bool -> Gen.map (fun b -> LitBool b) Gen.bool
+    | String -> Gen.map (fun s -> LitStr s) string_gen
+    | List (Typevar _) -> Gen.return (LitList [])
+    | List t ->
+      if size = 0
+      then Gen.return (LitList [])
+      else
+        Gen.map
+          (fun ls -> LitList ls)
+          (Gen.list_size (Gen.int_bound (sqrt size)) (literal_gen t eff (sqrt size)))
+    (*     (Gen.list_size (Gen.int_bound (size/2)) (literal_gen t eff (size/2))) *)
+    (* FIXME: - one element should/can have effect, if 'eff' allows *)
+    (*        - list items should be able to contain arbitrary effectful exps *)
+    | Typevar _ -> failwith "literal_gen: typevar arg. should not happen"
+    | Fun _ -> failwith "literal_gen: funtype arg. should not happen"
   ;;
 
   (* Sized generator of variables according to the LIT rule
@@ -1158,9 +1158,7 @@ end
 
 (** Shrinker and actual testing *)
 
-module Shrinker (Ctx : Context) = struct
-  module Gener = Generators (Ctx)
-
+module Shrinker = struct
   let create_lit t =
     let to_term s = Some (Lit s) in
     match t with
@@ -1168,7 +1166,7 @@ module Shrinker (Ctx : Context) = struct
     | Int -> to_term (LitInt (Gen.generate1 small_int.gen))
     | Float -> to_term (LitFloat (Gen.generate1 float.gen))
     | Bool -> to_term (LitBool (Gen.generate1 bool.gen))
-    | String -> to_term (LitStr (Gen.generate1 Gener.string_gen))
+    | String -> to_term (LitStr (Gen.generate1 StaticGenerators.string_gen))
     | List _ | Fun _ | Typevar _ -> None
   ;;
 
@@ -1536,32 +1534,20 @@ let rand_print_wrap typ trm =
       (true, false) )
 ;;
 
-module Arbitrary (Ctx : Context) = struct
-  module Gener = Generators (Ctx)
-  module Shrink = Shrinker (Ctx)
-
+module Arbitrary = struct
   (* TODO: Is it correct to name a function using suffix `_gen`
           if it is of type `'a arbitrary`
   *)
   let term_gen_by_type typ =
     make
       ~print:(Print.option (term_to_ocaml ~typeannot:false))
-      ~shrink:Shrink.shrinker
-      (Gener.term_gen typ (true, false))
+      ~shrink:Shrinker.shrinker
+      (fun rs ->
+        let module Gener = GeneratorsWithContext (FreshContext ()) in
+        Gener.term_gen typ (true, false) rs)
   ;;
 
   let int_term_gen = term_gen_by_type Int
-
-  (* Arbitrary type-dependent term generator - both the term and its type are generated by
-  the same random seed *)
-  let arb_dep_term =
-    make
-      ~print:
-        (let printer (_typ, trm) = term_to_ocaml ~typeannot:false trm in
-         Print.option printer)
-      ~shrink:Shrink.wrapped_dep_term_shrinker
-      Gener.dep_term_gen
-  ;;
 
   let typegen =
     make
@@ -1569,18 +1555,29 @@ module Arbitrary (Ctx : Context) = struct
       Gen.(
         frequency
           [ (1, map (fun i -> Typevar i) (oneofl [ 1; 2; 3; 4; 5 ]));
-            (6, sized Gener.type_gen)
+            (6, sized StaticGenerators.type_gen)
           ])
+  ;;
+
+  (* Arbitrary type-dependent term generator - both the term and its type are generated by
+  the same random seed *)
+  let arb_dep_term_with_cache =
+    make
+      ~print:
+        (let printer (_typ, trm) = term_to_ocaml ~typeannot:false trm in
+         Print.option printer)
+      ~shrink:Shrinker.wrapped_dep_term_shrinker
+      (fun rs ->
+        let module Gener = GeneratorsWithContext (FreshContext ()) in
+        Gener.dep_term_gen rs)
   ;;
 end
 
 let unify_funtest =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
   Test.make
     ~count:1000
     ~name:"unify functional"
-    (pair Arb.typegen Arb.typegen)
+    (pair Arbitrary.typegen Arbitrary.typegen)
     (fun (ty, ty') ->
       match unify ty ty' with
       | No_sol -> ty <> ty'
@@ -1590,26 +1587,25 @@ let unify_funtest =
         types_compat sty sty' || types_compat sty' sty)
 ;;
 
-(* FIXME: update to dep_term_gen *)
+(* FIXME: update to arb_dep_term *)
 let gen_classify =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
   Test.make
     ~count:1000
     ~name:"classify gen"
-    (make ~collect:(fun t -> if t = None then "None" else "Some") (gen Arb.int_term_gen))
+    (make
+       ~collect:(fun t -> if t = None then "None" else "Some")
+       (gen Arbitrary.int_term_gen))
     (fun _ -> true)
 ;;
 
 let can_compile_test =
   let counter = ref 1 in
   let file = "generated_tests/ocamltest.ml" in
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
   Test.make
     ~count:500
+    ~long_factor:10
     ~name:"generated term passes OCaml's typecheck"
-    Arb.dep_term_gen
+    Arbitrary.arb_dep_term_with_cache
     (fun t_opt ->
       t_opt
       <> None
@@ -1625,31 +1621,12 @@ let can_compile_test =
          with _ -> false))
 ;;
 
-let ocaml_test =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
+let type_check_test =
   Test.make
     ~count:500
-    ~name:"generated term passes OCaml's typecheck"
-    Arb.int_term_gen
+    ~name:"generated term type checks"
+    Arbitrary.arb_dep_term_with_cache
     (fun t_opt ->
-      t_opt
-      <> None
-      ==>
-      match t_opt with
-      | None -> false
-      | Some t ->
-        (try
-           let file = "generated_tests/ocamltest.ml" in
-           let () = write_prog (term_to_ocaml t) file in
-           0 = Sys.command ("ocamlc -w -5@20-26 " ^ file)
-         with Failure _ -> false))
-;;
-
-let type_check_test =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
-  Test.make ~count:500 ~name:"generated term type checks" Arb.arb_dep_term (fun t_opt ->
       t_opt
       <> None
       ==>
@@ -1662,12 +1639,10 @@ let type_check_test =
 ;;
 
 let int_eq_test =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
   Test.make
     ~count:500
     ~name:"bytecode/native backends agree - int_eq_test"
-    Arb.int_term_gen
+    Arbitrary.int_term_gen
     (fun topt ->
       topt
       <> None
@@ -1678,12 +1653,10 @@ let int_eq_test =
 ;;
 
 let rand_eq_test typ =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
   Test.make
     ~count:500
     ~name:"bytecode/native backends agree - term gen by given type"
-    (Arb.term_gen_by_type typ)
+    (Arbitrary.term_gen_by_type typ)
     (fun topt ->
       topt
       <> None
@@ -1694,12 +1667,11 @@ let rand_eq_test typ =
 ;;
 
 let dep_eq_test =
-  let module Ctx = FreshContext () in
-  let module Arb = Arbitrary (Ctx) in
   Test.make
     ~count:500
+    ~long_factor:10
     ~name:"bytecode/native backends agree - type-dependent term generator"
-    Arb.arb_dep_term
+    Arbitrary.arb_dep_term_with_cache
     (fun dep_t_opt ->
       dep_t_opt
       <> None
