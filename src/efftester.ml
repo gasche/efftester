@@ -1717,6 +1717,14 @@ let dep_eq_test =
 ;;
 
 let dep_eq_test_with_logging =
+      let time =
+        let cur = ref (Unix.gettimeofday ()) in
+        fun () ->
+          let last = !cur in
+          let next = Unix.gettimeofday () in
+          cur := next;
+          next -. last
+      in
   let counter = ref 1 in
   let log_file = open_out "generated_tests/testml_log.ml" in
   Test.make
@@ -1732,18 +1740,19 @@ let dep_eq_test_with_logging =
       | None ->
         Printf.fprintf
           log_file
-          "\n(* %i : *)\nfailwith \"dep_t_opt = None\";;\n"
+          "\n(* %i : *)\nfailwith \"dep_t_opt = None\";;\n%!"
           !counter;
         incr counter;
         false
       | Some (typ, trm) ->
-        let generated_src = term_to_ocaml (rand_print_wrap typ trm) in
-        let gen_src_with_order =
-          Printf.sprintf "\n(* %i : *)\n%s;;\n" !counter generated_src
-        in
-        output_string log_file gen_src_with_order;
+        Printf.fprintf log_file "(* Next: %d after %f *)\n%!" !counter (time ());
         incr counter;
-        is_native_byte_equiv gen_src_with_order)
+        let generated_src = term_to_ocaml (rand_print_wrap typ trm) in
+        Printf.fprintf log_file "(* Printing: %f *)\n%!" (time ());
+        Printf.fprintf log_file "%s;;\n%!" generated_src;
+        let result = is_native_byte_equiv generated_src in
+        Printf.ksprintf (output_string log_file) "(* Test: %f *)\n\n%!" (time ());
+        result)
 ;;
 
 (* The actual call to QCheck_runner.run_tests_main is located in effmain.ml *)
