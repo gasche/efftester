@@ -1621,6 +1621,40 @@ let can_compile_test =
          with _ -> false))
 ;;
 
+let can_compile_test_with_logging =
+  let counter = ref 1 in
+  let file = "generated_tests/ocamltest.ml" in
+  let log_file = open_out "generated_tests/ocamltestml_log.ml" in
+  Test.make
+    ~count:500
+    ~long_factor:10
+    ~name:"generated term passes OCaml's typecheck"
+    Arbitrary.arb_dep_term_with_cache
+    (fun t_opt ->
+      t_opt
+      <> None
+      ==>
+      match t_opt with
+      | None ->
+        Printf.fprintf
+          log_file
+          "\n (* %i: *) \n failwith \"dep_t_opt = None\";; \n"
+          !counter;
+        incr counter;
+        false
+      | Some (_typ, trm) ->
+        (try
+           let generated_src = term_to_ocaml trm in
+           let gen_src_with_order =
+             Printf.sprintf "\n(* %i : *)\n%s;;\n" !counter generated_src
+           in
+           output_string log_file gen_src_with_order;
+           write_prog gen_src_with_order file;
+           incr counter;
+           0 = Sys.command ("ocamlc -w -5@20-26 " ^ file)
+         with _ -> false))
+;;
+
 let type_check_test =
   Test.make
     ~count:500
@@ -1680,6 +1714,36 @@ let dep_eq_test =
       | None -> false
       | Some (typ, trm) ->
         is_native_byte_equiv @@ term_to_ocaml @@ rand_print_wrap typ trm)
+;;
+
+let dep_eq_test_with_logging =
+  let counter = ref 1 in
+  let log_file = open_out "generated_tests/testml_log.ml" in
+  Test.make
+    ~count:500
+    ~long_factor:10
+    ~name:"bytecode/native backends agree - type-dependent term generator"
+    Arbitrary.arb_dep_term_with_cache
+    (fun dep_t_opt ->
+      dep_t_opt
+      <> None
+      ==>
+      match dep_t_opt with
+      | None ->
+        Printf.fprintf
+          log_file
+          "\n(* %i : *)\nfailwith \"dep_t_opt = None\";;\n"
+          !counter;
+        incr counter;
+        false
+      | Some (typ, trm) ->
+        let generated_src = term_to_ocaml (rand_print_wrap typ trm) in
+        let gen_src_with_order =
+          Printf.sprintf "\n(* %i : *)\n%s;;\n" !counter generated_src
+        in
+        output_string log_file gen_src_with_order;
+        incr counter;
+        is_native_byte_equiv gen_src_with_order)
 ;;
 
 (* The actual call to QCheck_runner.run_tests_main is located in effmain.ml *)
